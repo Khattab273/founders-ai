@@ -148,8 +148,9 @@ terms.other as a short phrase (e.g. "MRR of at least $30k", "must be profitable"
    - Warm, natural and short: at most two sentences, then ONE question. Use the member's language (English or \
 Arabic); if they write in Arabic, reply in Modern Standard Arabic.
    - After a document arrives, show you read it by mentioning one specific detail.
-   - The missing list was made BEFORE the member's latest message. Ask about the first item still unknown after you \
-apply that message. Phrase it conversationally, never like a form.
+   - The missing list was made BEFORE the member's latest message. Of the items still unknown after you apply that \
+message, ask about the one that fits the conversation most naturally (usually the first). Never ask about anything \
+the member already said in ANY earlier message or the document. Phrase it conversationally, never like a form.
    - Clarify when it matters: if an answer is vague in a way that changes who you'd recommend, ask one short \
 clarifying question before moving on. Examples: "early stage" -> pre-seed, seed, or both? "software" -> what kind \
 (B2B SaaS, fintech, AI, marketplaces)? "in Qatar" -> based in Qatar, or selling into Qatar? Never ask about details that \
@@ -424,6 +425,20 @@ def dealbreaker_lines(s: Session) -> list[str]:
     return lines + add
 
 
+_MUST_WORK = re.compile(r"\b(only|must|have to|need to be|won'?t|will not|can'?t|cannot|not willing|refuse|no)\b[^.]{0,40}"
+                        r"\b(remote|on.?site|in.?office|hybrid|relocat\w*|office)\b|\b(remote|on.?site|hybrid)\s+only\b"
+                        r"|non.?negotiable|deal.?breaker", re.I)
+
+
+def _work_only_if_required(s: Session, said: str) -> None:
+    """A work mode filters people out only if the member said it's a requirement. "Hybrid is fine" is a preference:
+    it stays in their public terms as text, but it doesn't remove on-site or remote roles."""
+    if s.terms and s.terms.work and not _MUST_WORK.search(said):
+        s.terms.work = []
+        if s.raw_terms:
+            s.raw_terms.work = []
+
+
 def _all_private(t):
     """A member's own numbers are never explained to anyone else: mark every bound private.
 
@@ -469,6 +484,11 @@ def _messages(s: Session, need: list[str]) -> list[dict]:
     if _arabic_share(last) > 0.3:
         doc += "\n\nThe member is writing in Arabic: reply in Modern Standard Arabic."
     system = SYSTEM
+    if _has_rules(s):
+        context["dealbreakers_already_given"] = dealbreaker_lines(s)
+        system += ("\nDEAL-BREAKERS ARE ALREADY GIVEN (see dealbreakers_already_given). Do not ask for deal-breakers "
+                   "again in any form: no 'any other deal-breakers?', no examples of deal-breakers. If the member adds "
+                   "one on their own, record it.")
     if delta_mode():
         context["terms_so_far"] = s.raw_terms.model_dump(exclude_none=True) if s.raw_terms else {}
         context["empty_fields"] = [k for k in ("display_name", "headline", "public_bio", "looking_for", "location",
@@ -566,25 +586,32 @@ def _turn(session_id: str, text: str, file, stream: bool):
     s.raw_terms = fix_units(mark_private(_merge_terms(s.raw_terms, turn.terms), s.draft.private_limits), said,
                             s.draft.location)
     s.terms = _all_private(to_terms(s.raw_terms))
+    _work_only_if_required(s, said)
     # A "yes" only confirms the profile if it answers the summary.
     s.confirmed = turn.confirmed and s.summary_shown and ready(s)
     s.summary_shown = turn.asks == "summary"
     if turn.asks in ("dealbreakers", "summary"):
         s.dealbreakers_asked = True  # asked once ("none" is fine); never ask again after a summary
-    asks_more = re.search(r"deal.?breaker|rule (?:someone|anyone|people) out|anything else|any other|other requirement",
-                          turn.reply, re.I) and "?" in turn.reply
-    # Once they've just given deal-breakers and nothing required is missing, the next step is the summary: any other
-    # question here (more deal-breakers, equity, timeline...) would make their next "yes" ambiguous.
-    if _rules(s) != rules_before and _has_rules(s) and not _required(s) and (asks_more or turn.asks != "summary"):
-        # They just gave their deal-breakers; asking "any others?" makes the next "yes" ambiguous (and the
-        # model's own asks label can't be trusted here). Ask once more with a direct instruction.
-        note = [{"role": "user", "content": "(Note from Handshake: the member has just given their deal-breakers. "
-                                            "Write the summary now and ask only whether it is correct.)"}]
+    asks_more = re.search(r"deal.?breaker|rule (?:someone|anyone|people) out|anything else|any other|other requirement"
+                          r"|non.?negotiable|must.?have|would make you say no", turn.reply, re.I) and "?" in turn.reply
+    todo = _required(s)
+    # Deal-breakers are known, so asking for more makes the member repeat themselves (and makes their next "yes"
+    # ambiguous). And once they've just given them with nothing else missing, the next step is the summary.
+    redo = None
+    if _has_rules(s) and asks_more:
+        redo = ("Write the summary now and ask only whether it is correct." if not todo else
+                f"Do not ask about deal-breakers. Ask only about: {todo[0]}.")
+    elif _rules(s) != rules_before and _has_rules(s) and not todo and turn.asks != "summary":
+        redo = "Write the summary now and ask only whether it is correct."
+    if redo:
+        # The model's own asks label can't be trusted here, so code decides and asks once more, directly.
+        note = [{"role": "user", "content": "(Note from Handshake: the member has already given their deal-breakers. "
+                                            + redo + ")"}]
         try:
             again, _ = llm.chat_json(_messages(s, missing(s)) + note, _Turn, max_tokens=1500, timeout=TURN_TIMEOUT)
             if again.reply.strip():
                 turn = again
-                s.summary_shown = True
+                s.summary_shown = not todo
                 s.dealbreakers_asked = True
         except llm.LLMError:
             pass

@@ -286,3 +286,17 @@ def test_investor_stage_cheque_and_focus_come_from_their_words(monkeypatch):
     p = ob.send(sid, "Seed stage only. Cheques of 500k to 1 million dollars.")["profile"]
     assert p["public_terms"]["stages"] == "seed" and p["public_terms"]["cheque_size"] == "$500k–$1M"
     assert p["looking_for"] == "Founders at seed stage in healthtech, GCC."
+
+
+def test_work_preference_is_not_a_dealbreaker(monkeypatch):
+    script(monkeypatch, [{"role": "engineer", "profile": {"display_name": "Khalid"}, "terms": {"work": ["hybrid"]}, "reply": "ok"}])
+    sid = ob.start()["session_id"]
+    ob.send(sid, "hybrid is fine")
+    assert ob.get_session(sid).terms.work == []
+
+
+def test_work_requirement_is_a_dealbreaker(monkeypatch):
+    script(monkeypatch, [{"role": "engineer", "profile": {"display_name": "Sara"}, "terms": {"work": ["remote"]}, "reply": "ok"}])
+    sid = ob.start()["session_id"]
+    ob.send(sid, "remote only, I won't relocate")
+    assert ob.get_session(sid).terms.work == ["remote"]
