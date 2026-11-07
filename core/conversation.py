@@ -40,6 +40,7 @@ class Chat:
     matches: list = field(default_factory=list)
     profile: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    cancel: threading.Event | None = field(default=None, repr=False)   # set to stop the turn in progress
 
 
 _chats: dict[str, Chat] = {}
@@ -91,37 +92,63 @@ def _search(chat: Chat, gen, spoken: bool):
 
 def turn(chat_id: str, text: str = "", file: str | Path | None = None, spoken: bool = False):
     chat = get(chat_id)
+    mine = threading.Event()
+    if chat.cancel is not None:
+        chat.cancel.set()      # a newer message replaces a reply still being written; it stops at its next step
     with chat.lock:   # one turn at a time per chat (e.g. a voice turn and a typed turn can't interleave)
-        text = (text or "").strip()
-        label = ("🎤 " if spoken else "") + (text or ("📎 " + Path(file).name if file else ""))
-        chat.history.append({"role": "user", "content": label})
-        yield ("history", chat.history)
-        if chat.mode == "intake":
-            chat.history.append({"role": "assistant", "content": ""})
-            said, st = [], None
-            for kind, data in intake.send_stream(chat.id, text, file=file):
-                if kind == "say":
-                    said.append(data)
-                    chat.history[-1]["content"] = " ".join(said)
-                    yield ("history", chat.history)
-                    if spoken:
-                        yield ("say", data)
-                else:
-                    st = data
-            chat.history[-1]["content"] = st["reply"]
-            chat.profile = {**st["profile"], "_missing": st["missing"], "_done": st["done"]}
-            yield ("history", chat.history)
-            yield ("profile", chat.profile)
-            if not st["done"]:
+        chat.cancel = mine
+        yield from _guarded(chat, mine, _turn(chat, text, file, spoken))
+
+
+def _guarded(chat: Chat, mine: threading.Event, gen):
+    """Pass events through until a newer turn cancels this one; closing the generator stops the work early.
+    A turn that is cancelled (or abandoned by the browser) before it finishes leaves no trace in the chat."""
+    start, finished = len(chat.history), False
+    try:
+        for event in gen:
+            if mine.is_set():
                 return
-            chat.mode = "match"
-            yield ("mode", chat.mode)
-            yield from _search(chat, matchmaker.find(chat.id), spoken)
-            if chat.matches:
-                chat.history.append({"role": "assistant", "content": FOLLOW_UP})
+            yield event
+        finished = True
+    finally:
+        gen.close()
+        if not finished:
+            del chat.history[start:]
+        if chat.cancel is mine:
+            chat.cancel = None
+
+
+def _turn(chat: Chat, text: str, file, spoken: bool):
+    text = (text or "").strip()
+    label = ("🎤 " if spoken else "") + (text or ("📎 " + Path(file).name if file else ""))
+    chat.history.append({"role": "user", "content": label})
+    yield ("history", chat.history)
+    if chat.mode == "intake":
+        chat.history.append({"role": "assistant", "content": ""})
+        said, st = [], None
+        for kind, data in intake.send_stream(chat.id, text, file=file):
+            if kind == "say":
+                said.append(data)
+                chat.history[-1]["content"] = " ".join(said)
                 yield ("history", chat.history)
+                if spoken:
+                    yield ("say", data)
+            else:
+                st = data
+        chat.history[-1]["content"] = st["reply"]
+        chat.profile = {**st["profile"], "_missing": st["missing"], "_done": st["done"]}
+        yield ("history", chat.history)
+        yield ("profile", chat.profile)
+        if not st["done"]:
             return
-        yield from _search(chat, matchmaker.chat(chat.id, text), spoken)
+        chat.mode = "match"
+        yield ("mode", chat.mode)
+        yield from _search(chat, matchmaker.find(chat.id), spoken)
+        if chat.matches:
+            chat.history.append({"role": "assistant", "content": FOLLOW_UP})
+            yield ("history", chat.history)
+        return
+    yield from _search(chat, matchmaker.chat(chat.id, text), spoken)
 
 
 def spoken_turn(chat_id: str, audio_path: str):

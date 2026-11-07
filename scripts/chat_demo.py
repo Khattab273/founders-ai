@@ -130,9 +130,10 @@ async def voice_turn(chat_id: str, request: Request):
 VOICE_JS = r"""
 <script>
 (() => {
-  const SPEECH = 0.018, SPEECH_WHILE_PLAYING = 0.07, END_SILENCE_MS = 800, MIN_SPEECH_MS = 350, PREROLL_S = 0.5;
+  const SPEECH = 0.018, SPEECH_WHILE_PLAYING = 0.07, END_SILENCE_MS = 1300, MIN_SPEECH_MS = 350, PREROLL_S = 0.5;
   const S = {on: false, stream: null, ctx: null, proc: null, rate: 48000, pre: [], cur: null, inSpeech: false,
-             speechMs: 0, silenceMs: 0, abort: null, queue: [], playing: null, busy: false};
+             speechMs: 0, silenceMs: 0, abort: null, queue: [], playing: null, busy: false,
+             lastFrames: null, gotAudio: false, carry: null};
   const el = id => document.getElementById(id);
   const status = t => { const e = el('voice-status'); if (e) e.textContent = t; };
   const chatId = () => { const e = document.querySelector('#chat-id textarea, #chat-id input'); return e ? e.value : ''; };
@@ -169,8 +170,10 @@ VOICE_JS = r"""
     a.play().catch(() => { S.playing = null; playNext(); });
   }
 
-  async function send(blob) {
+  async function send(frames) {
     if (S.abort) S.abort.abort();                   // a new message replaces one still being answered
+    S.lastFrames = frames; S.gotAudio = false;
+    const blob = wav(frames, S.rate);
     S.abort = new AbortController(); S.busy = true; status('Thinking…');
     try {
       const r = await fetch('voice/' + encodeURIComponent(chatId()), {method: 'POST', body: blob,
@@ -184,7 +187,7 @@ VOICE_JS = r"""
           const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
           const ev = JSON.parse(line);
           if (ev.type === 'heard' || ev.type === 'update') refresh();
-          if ((ev.type === 'audio' || ev.type === 'error') && ev.audio) { S.queue.push(ev.audio); playNext(); }
+          if ((ev.type === 'audio' || ev.type === 'error') && ev.audio) { S.gotAudio = true; S.queue.push(ev.audio); playNext(); }
           if (ev.type === 'error' && !ev.audio) status(ev.text);
           if (ev.type === 'done') refresh();
         }
@@ -198,14 +201,25 @@ VOICE_JS = r"""
     const rms = Math.sqrt(sum / frame.length), thr = S.playing ? SPEECH_WHILE_PLAYING : SPEECH;
     S.pre.push(frame); while (S.pre.length * frame.length > PREROLL_S * S.rate) S.pre.shift();
     if (rms > thr) {
-      if (!S.inSpeech) { S.inSpeech = true; S.speechMs = 0; S.cur = S.pre.slice(); stopPlayback(); status('Listening…'); }
+      if (!S.inSpeech) {
+        S.inSpeech = true; S.speechMs = 0; S.cur = S.pre.slice(); stopPlayback();
+        if (S.abort) {                              // they're talking again: drop the old reply
+          if (!S.gotAudio && S.lastFrames) S.carry = S.lastFrames;   // ...but keep what they said, if it wasn't answered
+          S.abort.abort(); S.abort = null; S.busy = false;
+        }
+        status('Listening…');
+      }
       S.silenceMs = 0;
     } else if (S.inSpeech) { S.silenceMs += ms; }
     if (S.inSpeech) {
       S.cur.push(frame); S.speechMs += ms;
       if (S.silenceMs > END_SILENCE_MS) {
         S.inSpeech = false;
-        if (S.speechMs - S.silenceMs >= MIN_SPEECH_MS) send(wav(S.cur, S.rate)); else idle();
+        if (S.speechMs - S.silenceMs >= MIN_SPEECH_MS) {
+          const gap = new Float32Array(Math.floor(0.3 * S.rate));
+          send(S.carry ? [...S.carry, gap, ...S.cur] : S.cur);  // one message: the cut-off half + the rest
+          S.carry = null;
+        } else idle();
         S.cur = null;
       }
     }

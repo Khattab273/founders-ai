@@ -493,8 +493,17 @@ def send(session_id: str, text: str = "", file: str | Path | None = None) -> dic
 
 
 def send_stream(session_id: str, text: str = "", file: str | Path | None = None):
-    """Same as send(), for voice: yields ("say", sentence) as the reply is written, then ("state", dict)."""
-    yield from _turn(session_id, text, file, stream=True)
+    """Same as send(), for voice: yields ("say", sentence) as the reply is written, then ("state", dict).
+    If the caller stops early (the member interrupted), the unanswered message is taken back out of the history."""
+    s = get_session(session_id)
+    before, turns, finished = len(s.history), s.user_turns, False
+    try:
+        yield from _turn(session_id, text, file, stream=True)
+        finished = True
+    finally:
+        if not finished:
+            del s.history[before:]
+            s.user_turns = turns
 
 
 def _turn(session_id: str, text: str, file, stream: bool):
