@@ -367,3 +367,10 @@ def test_dealbreakers_are_recorded_from_their_words_when_the_model_doesnt(monkey
     got = {"valuation_low": lambda t: t.valuation and t.valuation.low, "valuation_high": lambda t: t.valuation and t.valuation.high,
            "salary_low": lambda t: t.salary and t.salary.low}[field](s.terms)
     assert got == value and ob._has_rules(s)
+
+
+def test_roles_question_is_caught_when_already_known():
+    s = ob.Session(id="x")
+    s.draft = ob.profiles.Draft(display_name="Maha", looking_for="A lead investor and a senior backend engineer.")
+    q = "To make sure I introduce you to the right people, are you looking for investors and engineers, or are you open to meeting operators as well?"
+    assert ob._asks_known(q, s) == "which kinds of people they want to meet"

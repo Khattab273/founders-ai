@@ -305,6 +305,10 @@ _QUESTION_TOPICS = [
     ("who they're looking for", r"(?:what|who)[^.?]{0,40}(?:looking for|looking to (?:meet|connect)|want to meet|hoping to "
      r"meet|like to (?:meet|connect))|what kind of (?:people|person|investors?|founders?)|who do you want",
      lambda d, s: bool(d.looking_for)),
+    ("which kinds of people they want to meet",
+     r"(?:investors?|engineers?|operators?|founders?)[^?]{0,80}(?:\bor\b|as well|too|also)[^?]*\?"
+     r"|open to (?:meeting|connecting with)|anyone else you(?:'d| would) like to meet",
+     lambda d, s: bool(d.looking_for)),
     ("where they're based", r"where (?:are you|is your|is the (?:company|startup)) based|which city|what city|your location",
      lambda d, s: bool(d.location)),
     ("their stage", r"what stage|which stage|pre-?seed, seed|stage (?:are you|is your)", lambda d, s: bool(d.stage)),
