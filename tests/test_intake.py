@@ -351,3 +351,19 @@ def test_arabic_role_is_read(monkeypatch):
     sid = ob.start()["session_id"]
     p = ob.send(sid, "أبحث عن دور رئيس العمليات في شركة ناشئة")["profile"]
     assert p["public_terms"]["role"] == "رئيس العمليات في"[:len("رئيس العمليات")] or p["public_terms"]["role"].startswith("رئيس العمليات")
+
+
+@pytest.mark.parametrize("role,said,field,value", [
+    ("founder", "We're at seed. My valuation floor is $12M.", "valuation_low", 12e6),
+    ("founder", "I won't accept a valuation below 10 million dollars", "valuation_low", 10e6),
+    ("investor", "I never invest above a $6M cap.", "valuation_high", 6e6),
+    ("engineer", "I want a lead role, at least $120k.", "salary_low", 120e3),
+])
+def test_dealbreakers_are_recorded_from_their_words_when_the_model_doesnt(monkeypatch, role, said, field, value):
+    script(monkeypatch, [{"role": role, "profile": {"display_name": "X"}, "reply": "Noted. Who are you looking for?"}])
+    sid = ob.start()["session_id"]
+    ob.send(sid, said)
+    s = ob.get_session(sid)
+    got = {"valuation_low": lambda t: t.valuation and t.valuation.low, "valuation_high": lambda t: t.valuation and t.valuation.high,
+           "salary_low": lambda t: t.salary and t.salary.low}[field](s.terms)
+    assert got == value and ob._has_rules(s)

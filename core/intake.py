@@ -373,6 +373,50 @@ def _repair(reply: str, s: Session, todo: list[str]) -> str:
     return (head + " " if head else "") + f"Could you tell me {item}?"
 
 
+_AMT = r"(\$?\s?\d[\d.,]*\s*(?:m\b|mn\b|million|k\b|thousand)?)"
+_FLOOR = re.compile(r"(?:valuation floor|floor)\D{0,20}?" + _AMT + r"|(?:won'?t|will not|wouldn'?t|not|never)\s+(?:accept|take|"
+                    r"go|raise)[^.]{0,30}?(?:below|under|less than|lower than)\s+(?:an?\s+)?" + _AMT, re.I)
+_CEIL = re.compile(r"(?:never|won'?t|will not|not|don'?t)\s+(?:invest|go|pay)[^.]{0,30}?(?:above|over|more than|beyond)\s+"
+                   r"(?:an?\s+)?" + _AMT + r"|(?:max(?:imum)?|ceiling|cap(?: of)?)\s+(?:valuation\s+)?(?:is\s+|of\s+)?" + _AMT, re.I)
+_MIN = re.compile(r"(?:at least|minimum(?: salary)?(?: is| of)?|no less than|not less than|won'?t (?:take|accept) less than"
+                  r"|nothing (?:below|under|less than))\s+(?:an?\s+)?" + _AMT, re.I)
+
+
+def _amount(token: str | None) -> float | None:
+    if not token:
+        return None
+    from core.terms import _amount as parse
+    v = parse(token.replace(" ", ""))
+    return v if v and v >= 1000 else None    # ignore stray small numbers ("at least 2 people")
+
+
+def _rules_from_words(s: Session, said: str) -> None:
+    """Deal-breakers the member clearly stated, recorded in code if the model didn't store them."""
+    from core.terms import RawRange
+    raw = s.raw_terms or RawTerms()
+    changed = False
+    if s.role == "founder" and not (raw.valuation and raw.valuation.low):
+        m = _FLOOR.search(said)
+        v = _amount(m and (m.group(1) or m.group(2)))
+        if v and v >= 100_000:
+            raw.valuation = RawRange(low=v, low_private=True, high=raw.valuation.high if raw.valuation else None)
+            changed = True
+    if s.role == "investor" and not (raw.valuation and raw.valuation.high):
+        m = _CEIL.search(said)
+        v = _amount(m and (m.group(1) or m.group(2)))
+        if v and v >= 100_000:
+            raw.valuation = RawRange(high=v, high_private=True)
+            changed = True
+    if s.role in ("engineer", "operator") and not (raw.salary and raw.salary.low):
+        m = _MIN.search(said)
+        v = _amount(m and m.group(1))
+        if v:
+            raw.salary = RawRange(low=v, low_private=True)
+            changed = True
+    if changed:
+        s.raw_terms = raw
+
+
 def _fill_looking_for(s: Session) -> None:
     """If the model left "looking for" empty but the member already said it through their terms, write it in code.
 
@@ -677,8 +721,9 @@ def _turn(session_id: str, text: str, file, stream: bool):
     _fill_from_words(s)
     s.offers = turn.offers.strip() or s.offers
     said = "\n".join(m["content"] for m in s.history if m["role"] == "user") + "\n" + s.document
-    s.raw_terms = fix_units(mark_private(_merge_terms(s.raw_terms, turn.terms), s.draft.private_limits), said,
-                            s.draft.location)
+    s.raw_terms = mark_private(_merge_terms(s.raw_terms, turn.terms), s.draft.private_limits)
+    _rules_from_words(s, " ".join(m["content"] for m in s.history if m["role"] == "user"))
+    s.raw_terms = fix_units(s.raw_terms, said, s.draft.location)
     s.terms = _all_private(to_terms(s.raw_terms))
     _work_only_if_required(s, said)
     # A "yes" only confirms the profile if it answers the summary.
@@ -706,6 +751,10 @@ def _turn(session_id: str, text: str, file, stream: bool):
                  f"Do not ask about deal-breakers. Ask only about: {todo[0]}."))
     elif _rules(s) != rules_before and _has_rules(s) and not todo and turn.asks != "summary":
         redo = "The member has just given their deal-breakers. Write the summary now and ask only whether it is correct."
+    elif (not todo and (_has_rules(s) or s.dealbreakers_asked) and not turn.confirmed and turn.asks != "summary"
+          and _questions(turn.reply) and not s.summary_shown):
+        # Everything needed is known: extra nice-to-have questions (timeline, team size...) only slow them down.
+        redo = "You have everything you need. Write the summary now and ask only whether it is correct."
     if redo:
         # The model's own asks label can't be trusted here, so code decides and asks once more, directly.
         note = [{"role": "user", "content": "(Note from Handshake: " + redo + ")"}]
