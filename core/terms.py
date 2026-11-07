@@ -181,8 +181,8 @@ def fix_units(raw: RawTerms, text: str, location: str = "") -> RawTerms:
                         r.currency = "AED"
                     elif "€" in w or "eur" in w:
                         r.currency = "EUR"
-                if r.period is None and any(x in w for x in _MONTH):
-                    r.period = "month"
+                # Monthly only if their own words say so; otherwise a salary is per year (models guess "month" wrongly).
+                r.period = "month" if any(x in w for x in _MONTH) else None
     for r in (raw.salary, *(h.salary for h in raw.hires)):
         fix(r)
     return raw

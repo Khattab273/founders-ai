@@ -300,3 +300,54 @@ def test_work_requirement_is_a_dealbreaker(monkeypatch):
     sid = ob.start()["session_id"]
     ob.send(sid, "remote only, I won't relocate")
     assert ob.get_session(sid).terms.work == ["remote"]
+
+
+def test_agent_never_asks_about_what_it_already_knows(monkeypatch):
+    stale = {"role": "founder", "profile": FOUNDER,
+             "reply": "Got it. Could you tell me more about what you're looking for in the people you want to meet?"}
+    fixed = {"role": "founder", "profile": FOUNDER, "reply": "Thanks. Is there anything that would rule someone out?"}
+    sent = script(monkeypatch, [stale, fixed])
+    sid = ob.start()["session_id"]
+    st = ob.send(sid, "I need a lead investor who knows fintech")
+    assert st["reply"] == fixed["reply"] and "already told you who they're looking for" in sent[1][-1]["content"]
+
+
+def test_known_topic_detection():
+    s = ob.Session(id="x")
+    s.draft = ob.profiles.Draft(display_name="Maha", looking_for="A lead investor.", location="Doha, Qatar")
+    assert ob._asks_known("Great. What's your name?", s) == "their name"
+    assert ob._asks_known("Where are you based?", s) == "where they're based"
+    assert ob._asks_known("Hi Maha, nice to meet you. What stage are you at?", s) == ""     # stage unknown: fine
+    assert ob._asks_known("You're looking for a lead investor.", s) == ""                  # not a question
+
+
+def test_talent_role_and_work_style_come_from_their_words(monkeypatch):
+    script(monkeypatch, [{"role": "engineer", "profile": {"display_name": "Khalid", "looking_for": "A fintech startup."},
+                          "reply": "ok"}])
+    sid = ob.start()["session_id"]
+    p = ob.send(sid, "I want a lead engineer role at a fintech startup, hybrid is fine, at least $120k.")["profile"]
+    assert p["public_terms"]["role"].lower().startswith("lead engineer") and p["public_terms"]["work_style"] == "hybrid"
+
+
+def test_repeat_deal_breaker_question_is_removed_by_code(monkeypatch):
+    nag = {"role": "founder", "profile": {**FOUNDER, "private_limits": ["Valuation floor $8M"]},
+           "terms": {"valuation": {"low": 8e6}}, "reply": "Noted your $8M floor. Are there any other deal-breakers?"}
+    script(monkeypatch, [nag, nag])                  # the model repeats itself even after the note
+    sid = ob.start()["session_id"]
+    st = ob.send(sid, "I'm Mariam... I won't go below $8M")
+    assert "other deal-breakers" not in st["reply"] and "Is that right?" in st["reply"]
+    assert ob.get_session(sid).summary_shown
+
+
+def test_salary_is_yearly_unless_they_say_monthly():
+    from core import terms as T
+    raw = T.RawTerms(salary=T.RawRange(low=120000, period="month"))
+    T.fix_units(raw, "at least $120k")
+    assert raw.salary.period is None
+
+
+def test_arabic_role_is_read(monkeypatch):
+    script(monkeypatch, [{"role": "operator", "profile": {"display_name": "ليلى"}, "reply": "تم"}])
+    sid = ob.start()["session_id"]
+    p = ob.send(sid, "أبحث عن دور رئيس العمليات في شركة ناشئة")["profile"]
+    assert p["public_terms"]["role"] == "رئيس العمليات في"[:len("رئيس العمليات")] or p["public_terms"]["role"].startswith("رئيس العمليات")

@@ -298,6 +298,81 @@ def _protect(draft: profiles.Draft, role: str | None) -> profiles.Draft:
     return draft
 
 
+# What a question is about -> how to tell it's already known. Used to stop the agent asking about things it knows.
+_QUESTION_TOPICS = [
+    ("their name", r"\byour name\b|what should i call you|who am i (?:speaking|talking) (?:to|with)",
+     lambda d, s: bool(d.display_name)),
+    ("who they're looking for", r"(?:what|who)[^.?]{0,40}(?:looking for|looking to (?:meet|connect)|want to meet|hoping to "
+     r"meet|like to (?:meet|connect))|what kind of (?:people|person|investors?|founders?)|who do you want",
+     lambda d, s: bool(d.looking_for)),
+    ("where they're based", r"where (?:are you|is your|is the (?:company|startup)) based|which city|what city|your location",
+     lambda d, s: bool(d.location)),
+    ("their stage", r"what stage|which stage|pre-?seed, seed|stage (?:are you|is your)", lambda d, s: bool(d.stage)),
+    ("what they're raising", r"how much (?:are you|you're) raising|(?:size|amount) of (?:the|your) (?:round|raise)",
+     lambda d, s: _has(d, "raising")),
+    ("their cheque size", r"cheque size|check size|ticket size|how much do you (?:typically )?invest",
+     lambda d, s: _has(d, "cheque_size", "check_size", "ticket")),
+    ("the kind of role they want", r"(?:what|which) kind of role|what (?:role|position)|kind of role you(?:'re| are) looking",
+     lambda d, s: _has(d, "role")),
+    ("their work style", r"remote, hybrid|remote or (?:on-?site|in.?office)|hybrid or|work (?:style|mode|arrangement)",
+     lambda d, s: _has(d, "work_style") or bool(s.terms and s.terms.work)),
+    ("their salary expectations", r"salary (?:expectation|range|are you)|how much (?:do you|would you) (?:want|expect)",
+     lambda d, s: _has(d, "salary") or bool(s.terms and s.terms.salary)),
+]
+
+
+def _asks_known(reply: str, s: Session) -> str:
+    """If the reply's question is about something already known, return what (e.g. "their name"), else ""."""
+    questions = " ".join(q for q in re.split(r"(?<=[.!?؟])\s+", reply) if q.strip().endswith(("?", "؟")))
+    if not questions:
+        return ""
+    for label, pattern, known in _QUESTION_TOPICS:
+        if re.search(pattern, questions, re.I) and known(s.draft, s):
+            return label
+    return ""
+
+
+_DB_QUESTION = re.compile(r"deal.?breaker|rule (?:someone|anyone|people) out|non.?negotiable|must.?have|anything else"
+                          r"|any other|other requirement|لا يمكنك التنازل|غير قابل(?:ة)? للتفاوض|متطلبات أخرى|شروط أخرى", re.I)
+
+
+def _questions(reply: str) -> list[str]:
+    return [q for q in re.split(r"(?<=[.!?؟])\s+", reply) if q.strip().endswith(("?", "؟"))]
+
+
+def _asks_dealbreakers(reply: str) -> bool:
+    return any(_DB_QUESTION.search(q) for q in _questions(reply))
+
+
+def summary_text(s: Session) -> str:
+    """A summary written by code from the profile, for when the model won't write one."""
+    d, ar = s.draft, _arabic_share(" ".join(m["content"] for m in s.history if m["role"] == "user")[-400:]) > 0.3
+    lines = [f"{d.display_name or 'You'}, {s.role or 'member'}" + (f" based in {d.location}" if d.location else "")]
+    if d.headline:
+        lines.append(d.headline)
+    if d.looking_for:
+        lines.append(f"Looking for: {d.looking_for}")
+    terms_ = "; ".join(f"{k.replace('_', ' ')}: {v}" for k, v in d.public_terms.items() if str(v).strip())
+    if terms_:
+        lines.append(f"Terms: {terms_}")
+    rules = dealbreaker_lines(s)
+    if rules:
+        lines.append("Private deal-breakers (only your agent sees these): " + "; ".join(rules))
+    text = "Here's what I have:\n" + "\n".join(f"- {x}" for x in lines) + "\nIs that right?"
+    return text if not ar else text + "\n(هل هذا صحيح؟)"
+
+
+def _repair(reply: str, s: Session, todo: list[str]) -> str:
+    """Remove questions about deal-breakers or known details, then ask the next real thing (or summarise)."""
+    keep = [x for x in re.split(r"(?<=[.!?؟])\s+", reply)
+            if not (x.strip().endswith(("?", "؟")) and (_DB_QUESTION.search(x) or _asks_known(x, s)))]
+    head = " ".join(keep).strip()
+    if not todo:
+        return (head + "\n\n" if head and not _questions(head) else "") + summary_text(s)
+    item = todo[0].split(":")[0].replace("your ", "")
+    return (head + " " if head else "") + f"Could you tell me {item}?"
+
+
 def _fill_looking_for(s: Session) -> None:
     """If the model left "looking for" empty but the member already said it through their terms, write it in code.
 
@@ -348,6 +423,25 @@ def _fill_from_words(s: Session) -> None:
             t = {k.lower(): v for k, v in d.public_terms.items()}
             focus = t.get("sectors") or ", ".join(d.tags[:3])
             d.looking_for = f"Founders at {t.get('stages', 'early')} stage" + (f" in {focus}" if focus else "") + "."
+        return
+    if s.role in ("engineer", "operator"):
+        if not _has(d, "role"):
+            job = r"(?:engineer|developer|designer|scientist|manager|director|operator|cto|coo|lead|head of [a-z]+)"
+            text = f"{d.looking_for} {said}"
+            m = (re.search(rf"\b(?:an?|as an?)\s+((?:[a-z\-]+\s+){{0,3}}?{job})\s+(?:role|position|job)\b", text, re.I)
+                 or re.search(rf"\b(?:an?|as an?)\s+((?:[a-z\-]+\s+){{0,3}}?(?:engineer|developer|designer|scientist|"
+                              rf"cto|coo|head of [a-z]+))\b", text, re.I))
+            ar = re.search(r"(?:دور|وظيفة|منصب)\s+([^\s،.,؟?]+(?:\s+[^\s،.,؟?]+){0,2})", said)
+            if m:
+                d.public_terms = {**d.public_terms, "role": m.group(1).strip()}
+            elif ar:   # Arabic: "دور رئيس العمليات" (a head of operations role)
+                d.public_terms = {**d.public_terms, "role": ar.group(1).strip()}
+        if not _has(d, "work_style"):
+            modes = [w for w, pat in (("remote", r"\bremote|عن بُعد|عن بعد"), ("hybrid", r"\bhybrid|هجين"),
+                                      ("on-site", r"on.?site|in.?office|من المكتب|حضوري"))
+                     if re.search(pat, said, re.I)]
+            if modes:
+                d.public_terms = {**d.public_terms, "work_style": " or ".join(modes)}
         return
     if s.role != "founder":
         return
@@ -593,20 +687,28 @@ def _turn(session_id: str, text: str, file, stream: bool):
     if turn.asks in ("dealbreakers", "summary"):
         s.dealbreakers_asked = True  # asked once ("none" is fine); never ask again after a summary
     asks_more = re.search(r"deal.?breaker|rule (?:someone|anyone|people) out|anything else|any other|other requirement"
-                          r"|non.?negotiable|must.?have|would make you say no", turn.reply, re.I) and "?" in turn.reply
+                          r"|non.?negotiable|must.?have|would make you say no"
+                          r"|لا يمكنك التنازل|غير قابل(?:ة)? للتفاوض|شروط(?:ًا)? أخرى|متطلبات أخرى|حدود(?:ًا)? أخرى|أي شروط",
+                          turn.reply, re.I) and ("?" in turn.reply or "؟" in turn.reply)
     todo = _required(s)
     # Deal-breakers are known, so asking for more makes the member repeat themselves (and makes their next "yes"
     # ambiguous). And once they've just given them with nothing else missing, the next step is the summary.
     redo = None
-    if _has_rules(s) and asks_more:
-        redo = ("Write the summary now and ask only whether it is correct." if not todo else
-                f"Do not ask about deal-breakers. Ask only about: {todo[0]}.")
+    known = _asks_known(turn.reply, s)
+    if known:
+        redo = (f"The member already told you {known}; do not ask about it again. "
+                + ("Write the summary now and ask only whether it is correct." if not todo and _has_rules(s) else
+                   f"Ask only about: {todo[0]}." if todo else "Ask only about anything that would rule someone out "
+                   "for them (deal-breakers), unless they already said there are none."))
+    elif _has_rules(s) and asks_more:
+        redo = ("The member has already given their deal-breakers. " +
+                ("Write the summary now and ask only whether it is correct." if not todo else
+                 f"Do not ask about deal-breakers. Ask only about: {todo[0]}."))
     elif _rules(s) != rules_before and _has_rules(s) and not todo and turn.asks != "summary":
-        redo = "Write the summary now and ask only whether it is correct."
+        redo = "The member has just given their deal-breakers. Write the summary now and ask only whether it is correct."
     if redo:
         # The model's own asks label can't be trusted here, so code decides and asks once more, directly.
-        note = [{"role": "user", "content": "(Note from Handshake: the member has already given their deal-breakers. "
-                                            + redo + ")"}]
+        note = [{"role": "user", "content": "(Note from Handshake: " + redo + ")"}]
         try:
             again, _ = llm.chat_json(_messages(s, missing(s)) + note, _Turn, max_tokens=1500, timeout=TURN_TIMEOUT)
             if again.reply.strip():
@@ -615,6 +717,11 @@ def _turn(session_id: str, text: str, file, stream: bool):
                 s.dealbreakers_asked = True
         except llm.LLMError:
             pass
+        if _has_rules(s) and (_asks_dealbreakers(turn.reply) or _asks_known(turn.reply, s)):
+            # The model asked again anyway: take the question out ourselves and ask the right thing.
+            turn = turn.model_copy(update={"reply": _repair(turn.reply, s, todo)})
+            s.summary_shown = not todo
+            s.dealbreakers_asked = True
     reply = turn.reply.strip() or ERROR_REPLY
     s.history.append({"role": "assistant", "content": reply})
     if stream:
