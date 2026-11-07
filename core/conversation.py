@@ -29,7 +29,6 @@ STEP_TEXT = {
     "rerank": lambda d: f"✓ Scored {d['scored']} on fit, kept the top {d['kept']}",
     "fit": lambda d: f"· {d['name']}: {d['level']}",
 }
-FOLLOW_UP = "Ask me to refine the list, why someone isn't on it, for more people like someone, or what to ask them."
 
 
 @dataclass
@@ -144,9 +143,6 @@ def _turn(chat: Chat, text: str, file, spoken: bool):
         chat.mode = "match"
         yield ("mode", chat.mode)
         yield from _search(chat, matchmaker.find(chat.id), spoken)
-        if chat.matches:
-            chat.history.append({"role": "assistant", "content": FOLLOW_UP})
-            yield ("history", chat.history)
         return
     yield from _search(chat, matchmaker.chat(chat.id, text), spoken)
 
