@@ -686,6 +686,7 @@ def _turn(session_id: str, text: str, file, stream: bool):
     s.history.append({"role": "user", "content": text})
     s.user_turns += 1
     rules_before = _rules(s)
+    asked_before = s.dealbreakers_asked
     need = missing(s)
     # At the deal-breaker step the reply may be replaced (see below), so voice waits for it instead of streaming.
     live = stream and not (need and need[0].startswith(DEALBREAKER_ITEM))
@@ -751,7 +752,7 @@ def _turn(session_id: str, text: str, file, stream: bool):
                  f"Do not ask about deal-breakers. Ask only about: {todo[0]}."))
     elif _rules(s) != rules_before and _has_rules(s) and not todo and turn.asks != "summary":
         redo = "The member has just given their deal-breakers. Write the summary now and ask only whether it is correct."
-    elif (not todo and (_has_rules(s) or s.dealbreakers_asked) and not turn.confirmed and turn.asks != "summary"
+    elif (not todo and (rules_before or asked_before) and not turn.confirmed and turn.asks != "summary"
           and _questions(turn.reply) and not s.summary_shown):
         # Everything needed is known: extra nice-to-have questions (timeline, team size...) only slow them down.
         redo = "You have everything you need. Write the summary now and ask only whether it is correct."
